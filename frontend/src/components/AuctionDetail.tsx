@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { getAuction, placeBid } from "../api/api";
 import { io } from "socket.io-client";
 
+// const socket = io("http://localhost:3000");
 const socket = io(import.meta.env.VITE_API_URL);
 
 interface Auction {

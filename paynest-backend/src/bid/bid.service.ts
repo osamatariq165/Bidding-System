@@ -20,42 +20,53 @@ export class BidService {
   ) {}
 
   async placeBid(itemId: number, userId: number, amount: number): Promise<Bid> {
-    return this.dataSource.transaction(async manager => {
-      // Lock the item row to prevent concurrent modifications
-      const item = await manager.findOne(this.itemRepository.target, {
-        where: { id: itemId },
-        relations: ['bids'],
-        lock: { mode: 'pessimistic_write' },
+    try {
+      return await this.dataSource.transaction(async manager => {
+        // 1- Lock the Item row without joining bids
+        const item = await manager.findOne(this.itemRepository.target, {
+          where: { id: itemId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!item) throw new NotFoundException('item not found');
+  
+        const auctionEnd = new Date(item.createdAt.getTime() + item.duration * 1000);
+        if (new Date() > auctionEnd) {
+          throw new BadRequestException('auction has ended');
+        }
+  
+        // 2- Load the bids separately inside the transaction
+        const bids = await manager.find(this.bidRepository.target, {
+          where: { item: { id: itemId } },
+        });
+  
+        // 3- Re-check highest bid
+        const highestBid = bids.reduce(
+          (max, b) => (+b.amount > +max ? +b.amount : +max),
+          +item.startingPrice
+        );
+        if (+amount <= highestBid) {
+          throw new BadRequestException('bid must be higher than current highest bid');
+        }
+  
+        // 4- Load the user
+        const user = await manager.findOne(this.userRepository.target, {
+          where: { id: userId },
+        });
+        if (!user) throw new NotFoundException('User not found');
+  
+        // 5- Create and save the bid
+        const bid = manager.create(this.bidRepository.target, { item, user, amount });
+        const saved = await manager.save(bid);
+  
+        // 6- Notify clients
+        this.bidGateway.notifyBidUpdate(itemId, amount);
+  
+        return saved;
       });
-      if (!item) throw new NotFoundException('Item not found');
-  
-      const auctionEnd = new Date(item.createdAt.getTime() + item.duration * 1000);
-      if (new Date() > auctionEnd) {
-        throw new BadRequestException('Auction has ended');
-      }
-  
-      // Re-check highest bid in transaction
-      const highestBid = item.bids.reduce(
-        (max, b) => (+b.amount > +max ? +b.amount : +max),
-        +item.startingPrice
-      );
-      if (+amount <= highestBid) {
-        throw new BadRequestException('Bid must be higher than current highest bid');
-      }
-  
-      const user = await manager.findOne(this.userRepository.target, {
-        where: { id: userId },
-      });
-      if (!user) throw new NotFoundException('User not found');
-  
-      const bid = manager.create(this.bidRepository.target, { item, user, amount });
-      const saved = await manager.save(bid);
-  
-      // Optionally: emit updates outside the transaction to avoid blocking
-      this.bidGateway.notifyBidUpdate(itemId, amount);
-  
-      return saved;
-    });
+    } catch (e) {
+      console.log('Error while placing bid:', e);
+      throw e;
+    }
   }
-  
+    
 }
